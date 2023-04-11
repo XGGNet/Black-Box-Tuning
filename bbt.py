@@ -3,6 +3,8 @@ import copy
 import time
 import random
 
+from pdb import set_trace as st
+
 import torch
 # import fitlog
 import argparse
@@ -197,6 +199,10 @@ class LMForwardAPI:
                 onnx_model_path=onnx_model_path,
             )
             self.model.lm_head.bias = torch.nn.parameter.Parameter(torch.zeros(self.config.vocab_size))
+            # [50265,]
+        
+            # st()
+
         elif model_name in ['bert-base-uncased', 'bert-large-uncased']:
             self.config = BertConfig.from_pretrained(model_name)
             self.tokenizer = BertTokenizer.from_pretrained(model_name)
@@ -247,9 +253,10 @@ class LMForwardAPI:
             )
         else:
             raise NotImplementedError
-        if inference_framework == 'ort':
+        
+        if inference_framework == 'ort': #'pt'
             self.model.roberta = None
-        if cat_or_add == 'cat':
+        if cat_or_add == 'cat': # 'add'
             self.model.set_concat_prompt(True)
             if init_prompt_path is not None:
                 print('Initialize prompt embedding from {}'.format(init_prompt_path))
@@ -261,9 +268,20 @@ class LMForwardAPI:
         else:
             # self.model.set_concat_prompt(False)
             self.init_prompt = None
+        
+        '''
+        code这里是用add而不是cat, 初始化为none
+        '''
+
+        # self.init_prompt = None
+
+        # st()
+
         self.model.to(device)
         self.model.eval()
         self.linear = torch.nn.Linear(intrinsic_dim, n_prompt_tokens * self.config.hidden_size, bias=False)
+        # 增加的fine-tune layer  A
+
         if random_proj == 'normal':
             # calculate std for normal distribution
             if model_name in ['roberta-base', 'roberta-large']:
@@ -279,16 +297,25 @@ class LMForwardAPI:
             else:  # T5
                 embedding = self.model.get_input_embeddings().weight.clone().cpu()
             # embedding = embedding[1000: 2000]
-            mu_hat = np.mean(embedding.reshape(-1).detach().cpu().numpy())
-            std_hat = np.std(embedding.reshape(-1).detach().cpu().numpy())
+
+            #st()
+            # embedding torch.Size([50265, 1024]) 
+        
+            mu_hat = np.mean(embedding.reshape(-1).detach().cpu().numpy()) # 均值
+            std_hat = np.std(embedding.reshape(-1).detach().cpu().numpy()) # 方差
             mu = 0.0
             std = alpha * std_hat / (np.sqrt(intrinsic_dim) * sigma)
             # temp = intrinsic_dim - std_hat * std_hat
             # mu = mu_hat / temp
             # std = std_hat / np.sqrt(temp)
             print('[Embedding] mu: {} | std: {} [RandProj]  mu: {} | std: {}'.format(mu_hat, std_hat, mu, std))
+
+            #st()
+
+            # 将linear进行初始化
             for p in self.linear.parameters():
                 torch.nn.init.normal_(p, mu, std)
+
         self.best_train_perf = 0.0
         self.best_dev_perf = 0.0
         self.best_prompt = None
@@ -378,6 +405,7 @@ class LMForwardAPI:
         converted_target = target.clone()
         for key, val in label_map.items():
             converted_target[target == key] = val
+
         interest_index = list(label_map.keys())
         logits = logits[:, interest_index]
         pred = logits.argmax(dim=-1)
@@ -389,6 +417,8 @@ class LMForwardAPI:
                             pred.detach().cpu().numpy().tolist())
         else:
             raise KeyError(f'[Metric] Only support [acc, f1], got {self.metric_key} instead.')
+
+        # st()
 
         if self.loss_type == 'hinge':
             loss = hinge_loss(logits, converted_target, margin=self.margin, reduction='sum').item() / len(target)
@@ -403,6 +433,11 @@ class LMForwardAPI:
 
     def eval(self, prompt_embedding=None, test_data=None):
         self.num_call += 1
+
+        #st()#
+        # prompt_embedding (500,)
+        # test_data None
+
         if prompt_embedding is None:
             prompt_embedding = self.best_prompt
         if test_data is None:
@@ -420,16 +455,19 @@ class LMForwardAPI:
                 pe_list.append(z.reshape(n_prompt_tokens, -1).repeat(bsz, 1, 1))
             prompt_embedding = torch.cat(pe_list)  # num_workers*bsz x prompt_len x dim
             assert len(prompt_embedding) == len(train_data['input_ids'])
+
         elif isinstance(prompt_embedding, np.ndarray):  # single query or None
             prompt_embedding = torch.tensor(prompt_embedding).type(torch.float32)  # z
             prompt_embedding = self.linear(prompt_embedding)  # Az
             if self.init_prompt is not None:
                 prompt_embedding = prompt_embedding + self.init_prompt  # Az + p_0
             prompt_embedding = prompt_embedding.reshape(n_prompt_tokens, -1).repeat(bsz, 1, 1)
+
         else:
             raise ValueError(
                 f'[Prompt Embedding] Only support [list, numpy.ndarray], got `{type(prompt_embedding)}` instead.'
             )
+        # 取等
         self.model.set_prompt_embedding(prompt_embedding)
 
         if isinstance(test_data, DataSet):
@@ -444,6 +482,7 @@ class LMForwardAPI:
         else:
             for k, v in train_data.items():
                 train_data[k] = v.to(device)
+
             with torch.no_grad():
                 if model_name in ['t5-small', 't5-base', 't5-large', 't5-3b']:
                     logits = self.model(
@@ -463,6 +502,8 @@ class LMForwardAPI:
                         attention_mask=train_data['attention_mask'],
                         mask_pos=train_data['mask_pos'],
                     )['logits']
+
+            # logits torch.Size([32, 50265])
 
             if parallel:  # we have multiple queries
                 all_losses, all_perfs = [], []
@@ -644,7 +685,12 @@ if task_name in ['agnews', 'yelpp', 'dbpedia', 'snli']:
 else:
     train_data, test_data = data_bundle.get_dataset('train'), data_bundle.get_dataset('validation')
 
+# st()
+# train_data, test_data # fastNLP format
+
 train_data, dev_data = construct_true_few_shot_data(train_data, k_shot)
+# 取出k-shot数据
+
 for ds in [train_data, dev_data, test_data]:
     ds.set_pad_val('input_ids', tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0)
     ds.set_pad_val('attention_mask', 0)
@@ -657,6 +703,8 @@ print(dev_data[0])
 print('\n# of test data: {}'.format(len(test_data)))
 print('Example:')
 print(test_data[0])
+
+# st()
 
 if model_name in ['t5-small', 't5-base', 't5-large', 't5-3b']:
     train_data = {
@@ -715,7 +763,13 @@ cma_opts = {
 }
 if bound > 0:
     cma_opts['bounds'] = [-1 * bound, 1 * bound]
+
+# 调用 CMA-ES 进行优化
 es = cma.CMAEvolutionStrategy(intrinsic_dim * [0], sigma, inopts=cma_opts)
+# 500*[0], sigma=1, cma_opts {'seed': 42, 'popsize': 20, 'maxiter': 400, 'verbose': -1}
+
+# st()
+
 print('Population Size: {}'.format(es.popsize))
 print('{} Evaluation.'.format('Parallel' if parallel else 'Serial'))
 if parallel:
@@ -727,13 +781,27 @@ if parallel:
 
 # opt = cma.CMAOptions()
 start_time = time.time()
+
+# 达到停止 CMA-ES的条件，比如max_iter
 while not es.stop():
-    solutions = es.ask()
+    solutions = es.ask()  # solution list len=20, each element>(500,) 生成候选解
+
+    # st()
+
+    # solution = prompt_embedding
+    # fitness = loss
+
     if parallel:
         fitnesses = model_forward_api.eval(solutions)
     else:
         fitnesses = [model_forward_api.eval(x) for x in solutions]
-    es.tell(solutions, fitnesses)
+    # len(fitnesses) = 20
+    # st() 
+
+    es.tell(solutions, fitnesses) #传回 每组解solution的对应的适应度fitness
+
+    # st()
+
     # es.logger.add()  # write data to disc to be plotted
     # es.disp()
 end_time = time.time()
